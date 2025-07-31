@@ -20,8 +20,8 @@ RETURNING id, created_at, updated_at, email, hashed_password, is_chirpy_red
 `
 
 type CreateUserParams struct {
-	Email          string
-	Hashedpassword string
+	Email          string `json:"email"`
+	Hashedpassword string `json:"hashedpassword"`
 }
 
 func (q *Queries) CreateUser(ctx context.Context, arg CreateUserParams) (User, error) {
@@ -97,9 +97,9 @@ RETURNING id, created_at, updated_at, email, hashed_password, is_chirpy_red
 `
 
 type UpdateUserParams struct {
-	Hashedpassword string
-	Email          string
-	Userid         uuid.UUID
+	Hashedpassword string    `json:"hashedpassword"`
+	Email          string    `json:"email"`
+	Userid         uuid.UUID `json:"userid"`
 }
 
 func (q *Queries) UpdateUser(ctx context.Context, arg UpdateUserParams) (User, error) {
