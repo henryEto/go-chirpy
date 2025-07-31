@@ -8,54 +8,103 @@ import (
 	"os"
 	"sync/atomic"
 
+	"github.com/henryEto/go-chirpy/internal/database"
 	"github.com/joho/godotenv"
 	_ "github.com/lib/pq"
-	"github.com/zonne13/go-chirpy/internal/database"
 )
 
-const (
-	port         = 8080
-	filepathRoot = "."
+var (
+	filepathRoot string
+	port         string
+	dbURL        string
 )
 
 type apiConfig struct {
 	fileserverHits atomic.Int32
-	dbQueries      *database.Queries
+	queries        *database.Queries
+	secret         string
+	polkaKey       string
+}
+
+func loadEnv() error {
+	err := godotenv.Load()
+	filepathRoot = os.Getenv("FILE_PATH_ROOT")
+	port = os.Getenv("PORT")
+	dbURL = os.Getenv("DB_URL")
+	return err
 }
 
 func main() {
-	godotenv.Load()
-	dbURL := os.Getenv("DB_URL")
-
-	db, err := sql.Open("postgres", dbURL)
+	err := loadEnv()
 	if err != nil {
-		log.Printf("Error opeining database: %W", err)
-	}
-	dbQueries := database.New(db)
-
-	apiCfg := apiConfig{
-		fileserverHits: atomic.Int32{},
-		dbQueries:      dbQueries,
+		log.Fatalf("Failed to load .env file: %v", err)
+		os.Exit(1)
 	}
 
+	conn, err := sql.Open("postgres", dbURL)
+	if err != nil {
+		log.Fatalf("Failed to open database: %v", err)
+		os.Exit(1)
+	}
+	queries := database.New(conn)
+
+	// Necesary secrets
+	serverSecret := os.Getenv("TOKEN_SECRET")
+	if serverSecret == "" {
+		log.Fatal("Failed to load TOKEN_SECRET")
+		os.Exit(1)
+	}
+	polkaKey := os.Getenv("POLKA_KEY")
+	if polkaKey == "" {
+		log.Fatal("Failed to load POLKA_KEY")
+		os.Exit(1)
+	}
+
+	// Create HTTP request multiplexer
 	mux := http.NewServeMux()
-	srvr := http.Server{
-		Handler: mux,
-		Addr:    fmt.Sprintf(":%v", port),
+	cfg := apiConfig{
+		fileserverHits: atomic.Int32{},
+		queries:        queries,
+		secret:         serverSecret,
+		polkaKey:       polkaKey,
 	}
 
-	// App endpoints
-	mux.Handle("/app/", apiCfg.midlewareMetricsInc(http.StripPrefix("/app/", http.FileServer(http.Dir(filepathRoot)))))
-	// Api endpoints
-	mux.HandleFunc("GET /api/healthz", hadlerReadiness)
+	// Simple file server a root dir
+	mux.Handle("/app/", http.StripPrefix("/app", cfg.middlewareMetricsInc(
+		http.FileServer(http.Dir(filepathRoot)))),
+	)
+
+	// Readiness check
+	mux.HandleFunc("GET /api/healthz", handlerReadiness)
+
+	// Metrics
+	mux.HandleFunc("GET /admin/metrics", cfg.handlerMetrics)
+	mux.HandleFunc("POST /admin/reset", cfg.handlerReset)
+
+	// Chirps
 	mux.HandleFunc("POST /api/validate_chirp", handlerValidateChirp)
-	mux.HandleFunc("POST /api/users", apiCfg.handlerCreateUser)
-	// Admin edpoints
-	mux.HandleFunc("GET /admin/metrics", apiCfg.handlerMetrics)
-	mux.HandleFunc("POST /admin/reset", apiCfg.hadlerResetMetrics)
+	mux.HandleFunc("POST /api/chirps", cfg.handlerChirpsPost)
+	mux.HandleFunc("GET /api/chirps", cfg.handlerChirpsGet)
+	mux.HandleFunc("GET /api/chirps/{chirpID}", cfg.handlerChirpsGetByID)
+	mux.HandleFunc("DELETE /api/chirps/{chirpID}", cfg.handlerChirpsDelete)
 
-	log.Printf("Serving files from %s on port: %v\n", filepathRoot, port)
-	if err := srvr.ListenAndServe(); err != nil {
-		log.Println(err)
+	// Users
+	mux.HandleFunc("POST /api/users", cfg.handlerUsersPost)
+	mux.HandleFunc("PUT /api/users", cfg.handlerUsersPut)
+
+	// Login
+	mux.HandleFunc("POST /api/login", cfg.handlerLogin)
+	mux.HandleFunc("POST /api/refresh", cfg.handlerRefresh)
+	mux.HandleFunc("POST /api/revoke", cfg.handlerRevoke)
+
+	// Webhooks
+	mux.HandleFunc("POST /api/polka/webhooks", cfg.handlerPolkaWebhooks)
+
+	srv := &http.Server{
+		Addr:    fmt.Sprintf(":%s", port),
+		Handler: mux,
 	}
+
+	log.Printf("Serving files from %s on port: %s\n", filepathRoot, port)
+	log.Fatal(srv.ListenAndServe())
 }
